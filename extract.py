@@ -20,6 +20,8 @@ import os
 import struct
 import sys
 
+ABCT_HEADER_SIZE = 512 # AdbBackupControlType
+DEFAULT_TWDATA_SIZE = 1024 * 1024 # 1MB
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -101,23 +103,23 @@ def load_file(stream, rules):
 	file_info = {
 		"name": info["name"],
 		"size": info["size"],
-		"pos": stream.tell() - 512,
+		"pos": stream.tell() - ABCT_HEADER_SIZE,
 	}
 
-	file_info["nb_chunks"] = info["size"] // (1024*1024-512)
-	file_info["last_size"] = info["size"] - (file_info["nb_chunks"] * (1024*1024-512))
+	file_info["nb_chunks"] = info["size"] // (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE)
+	file_info["last_size"] = info["size"] - (file_info["nb_chunks"] * (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE))
 
 	if info["name"] in rules:
 		rule_set = rules[info["name"]]
 
 		stream.seek(rule_set["start"], 1)
-		stream.seek(rule_set["num_cycles"] * (1024*1024), 1)
+		stream.seek(rule_set["num_cycles"] * (DEFAULT_TWDATA_SIZE), 1)
 		stream.seek(rule_set["end"], 1)
 
-		tot = rule_set["start"]-512 + rule_set["num_cycles"] * (1024*1024-512) + rule_set["end"]-512
+		tot = rule_set["start"]-ABCT_HEADER_SIZE + rule_set["num_cycles"] * (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE) + rule_set["end"]-ABCT_HEADER_SIZE
 		print(tot)
 	else:
-		size_to_seek = info["size"] + file_info["nb_chunks"]*512 + 512
+		size_to_seek = info["size"] + file_info["nb_chunks"]*ABCT_HEADER_SIZE + ABCT_HEADER_SIZE
 		stream.seek(size_to_seek, 1)
 
 	info = read_ctrl_block(stream)
@@ -136,33 +138,33 @@ def export_file(stream, file_info, rules):
 	print("  *","last chunk size", file_info["last_size"])
 
 	stream.seek(file_info["pos"])
-	stream.seek(512, 1)
+	stream.seek(ABCT_HEADER_SIZE, 1)
 
 	if file_info["name"] in rules:
 		rule_set = rules[file_info["name"]]
 
 		with open(name, "wb") as f:			
 			print("first chunk", rule_set["start"])
-			stream.seek(512, 1)
-			f.write(stream.read(rule_set["start"]-512))
+			stream.seek(ABCT_HEADER_SIZE, 1)
+			f.write(stream.read(rule_set["start"]-ABCT_HEADER_SIZE))
 
 			for i in range(rule_set["num_cycles"]):
-				stream.seek(512, 1)
-				f.write(stream.read(1024*1024  -512))
+				stream.seek(ABCT_HEADER_SIZE, 1)
+				f.write(stream.read(DEFAULT_TWDATA_SIZE  -ABCT_HEADER_SIZE))
 
 			print("last chunk", rule_set["end"])
-			stream.seek(512, 1)
-			f.write(stream.read(rule_set["end"]-512))
+			stream.seek(ABCT_HEADER_SIZE, 1)
+			f.write(stream.read(rule_set["end"]-ABCT_HEADER_SIZE))
 
 	else:
 		with open(name, "wb") as f:
 			for i in range(file_info["nb_chunks"]):
-				stream.seek(512, 1)
-				f.write(stream.read(1024*1024  -512))
+				stream.seek(ABCT_HEADER_SIZE, 1)
+				f.write(stream.read(DEFAULT_TWDATA_SIZE  -ABCT_HEADER_SIZE))
 
 			if file_info["last_size"]:
 				print("last one", file_info["last_size"])
-				stream.seek(512, 1)
+				stream.seek(ABCT_HEADER_SIZE, 1)
 				f.write(stream.read(file_info["last_size"]))
 
 
