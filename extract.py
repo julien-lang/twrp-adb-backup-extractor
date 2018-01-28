@@ -30,20 +30,7 @@ def main():
 	parser.add_argument("--interractive", "-i", action="store_true", default=False)
 
 	args = parser.parse_args()
-	rules = {
-		"/data/media/0/TWRP/2018-01-24--19-38-14_KTU84PG901FXXU1ANI4/system.ext4.win": {
-			"start": 1041408,
-			"num_cycles": 2023,
-			"end": 1043968,
-			"known_pos": 13640192,
-		},
-		"/data/media/0/TWRP/2018-01-24--19-38-14_KTU84PG901FXXU1ANI4/data.ext4.win": {
-			"start": 942592,
-			"num_cycles": 5186,
-			"end": 665088,
-			"known_pos": 2136995840,
-		},
-	}
+	rules = {}
 
 	files = load_image(args.file_ab_twrp, rules)
 	if not files:
@@ -109,18 +96,8 @@ def load_file(stream, rules):
 	file_info["nb_chunks"] = info["size"] // (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE)
 	file_info["last_size"] = info["size"] - (file_info["nb_chunks"] * (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE))
 
-	if info["name"] in rules:
-		rule_set = rules[info["name"]]
-
-		stream.seek(rule_set["start"], 1)
-		stream.seek(rule_set["num_cycles"] * (DEFAULT_TWDATA_SIZE), 1)
-		stream.seek(rule_set["end"], 1)
-
-		tot = rule_set["start"]-ABCT_HEADER_SIZE + rule_set["num_cycles"] * (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE) + rule_set["end"]-ABCT_HEADER_SIZE
-		print(tot)
-	else:
-		size_to_seek = info["size"] + file_info["nb_chunks"]*ABCT_HEADER_SIZE + ABCT_HEADER_SIZE
-		stream.seek(size_to_seek, 1)
+	size_to_seek = info["size"] + file_info["nb_chunks"]*ABCT_HEADER_SIZE + ABCT_HEADER_SIZE
+	stream.seek(size_to_seek, 1)
 
 	info = read_ctrl_block(stream)
 	if not info or info["type"] != "md5trailer":
