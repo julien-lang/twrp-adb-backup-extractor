@@ -20,38 +20,34 @@ import os
 import struct
 import sys
 
+ABCT_HEADER_SIZE = 512 # AdbBackupControlType
+DEFAULT_TWDATA_SIZE = 1024 * 1024 # 1MB
 
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("action", choices=["list"])
 	parser.add_argument("file_ab_twrp", type=argparse.FileType("rb"))
 	parser.add_argument("--interractive", "-i", action="store_true", default=False)
+	parser.add_argument("--auto-fix", action="store_true", default=False)
 
 	args = parser.parse_args()
-	rules = {
-		"/data/media/0/TWRP/2018-01-24--19-38-14_KTU84PG901FXXU1ANI4/system.ext4.win": {
-			"start": 1041408,
-			"num_cycles": 2023,
-			"end": 1043968,
-			"known_pos": 13640192,
-		},
-		"/data/media/0/TWRP/2018-01-24--19-38-14_KTU84PG901FXXU1ANI4/data.ext4.win": {
-			"start": 942592,
-			"num_cycles": 5186,
-			"end": 665088,
-			"known_pos": 2136995840,
-		},
-	}
 
-	files = load_image(args.file_ab_twrp, rules)
+	files = load_image(args.file_ab_twrp, args)
 	if not files:
 		sys.exit(1)
 
-
 	for item in files: #.values():
 		print("  *", item["name"])
-		print("     size:", pretty_size(item["size"]), "(%d)" % item["size"])
+		if "real_size" in item:
+			print("     declared size:", pretty_size(item["size"]), "(%d)" % item["size"])
+			print("     real size:    ", pretty_size(item["real_size"]), "(%d)" % item["real_size"])
+		else:
+			print("     size:", pretty_size(item["size"]), "(%d)" % item["size"])
+
 		print("     md5:", item["md5"])
+		print("     data sequence:")
+		for seq in item["sequence"]:
+			print("       ",seq[0], " x ", seq[1])
 	
 	print()
 
@@ -60,12 +56,12 @@ def main():
 			res = input("Do you want to export {filename}? [Y/n]?".format(filename=os.path.basename(item["name"])))
 			if res.strip().lower() not in "y":
 				continue
-			
+
 			print("  Exporting...")
-			export_file(args.file_ab_twrp, item, rules)
+			export_file(args.file_ab_twrp, item)
 
 
-def load_image(stream, rules):
+def load_image(stream, args):
 	info = read_ctrl_block(stream)
 	if not info or info["type"] != "twstreamheader":
 		print("Invalid image")
@@ -75,7 +71,7 @@ def load_image(stream, rules):
 
 	files = []
 	for i in range(info["partition_count"]):
-		f_item = load_file(stream, rules)
+		f_item = load_file(stream, args)
 		if not f_item:
 			print("Unable to retrieve file #"+str(i))
 			return
@@ -90,7 +86,7 @@ def load_image(stream, rules):
 	return files
 
 
-def load_file(stream, rules):
+def load_file(stream, args):
 	info = read_ctrl_block(stream)
 	if not info:
 		return
@@ -101,69 +97,125 @@ def load_file(stream, rules):
 	file_info = {
 		"name": info["name"],
 		"size": info["size"],
-		"pos": stream.tell() - 512,
+		"pos": stream.tell() - ABCT_HEADER_SIZE,
 	}
 
-	file_info["nb_chunks"] = info["size"] // (1024*1024-512)
-	file_info["last_size"] = info["size"] - (file_info["nb_chunks"] * (1024*1024-512))
+	file_info["nb_chunks"] = info["size"] // (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE)
+	file_info["last_size"] = info["size"] - (file_info["nb_chunks"] * (DEFAULT_TWDATA_SIZE-ABCT_HEADER_SIZE))
 
-	if info["name"] in rules:
-		rule_set = rules[info["name"]]
+	sequence = [(file_info["nb_chunks"], DEFAULT_TWDATA_SIZE)]
+	if file_info["last_size"]:
+		sequence.append((1, file_info["last_size"] + ABCT_HEADER_SIZE))
 
-		stream.seek(rule_set["start"], 1)
-		stream.seek(rule_set["num_cycles"] * (1024*1024), 1)
-		stream.seek(rule_set["end"], 1)
-
-		tot = rule_set["start"]-512 + rule_set["num_cycles"] * (1024*1024-512) + rule_set["end"]-512
-		print(tot)
-	else:
-		size_to_seek = info["size"] + file_info["nb_chunks"]*512 + 512
-		stream.seek(size_to_seek, 1)
+	size_to_seek = sum([a*b for a,b in sequence] )
+	stream.seek(size_to_seek, 1)
 
 	info = read_ctrl_block(stream)
 	if not info or info["type"] != "md5trailer":
 		print("Invalid file trailer")
-		return
+		
+		info = load_file_search(stream, file_info)
+		if not info:
+			return
+	else:
+		file_info["sequence"] = sequence
 
 	file_info["md5"] = info["md5"]
 	return file_info
 
 
-def export_file(stream, file_info, rules):
+def load_file_search(stream, file_info):
+	# first packet is less than 1 MB. And last packet same. Size attribute is wrong.
+	# but in the middle, all packet are 1MB
+
+	stream.seek(file_info["pos"]+ABCT_HEADER_SIZE)
+	info = read_ctrl_block(stream)
+	if not info or info["type"] != "twdatablock":
+		print("Auto-fix: unable to process since first twdatablock is invalid")
+		return False
+	
+	data = stream.read(DEFAULT_TWDATA_SIZE)
+	stream.seek(-DEFAULT_TWDATA_SIZE, 1)
+
+	pos = data.find(b"TWRP")
+	if pos == -1:
+		print("Auto-fix: unable to find next twdatablock after first one")
+		return False
+
+	sequence = [(1, pos + ABCT_HEADER_SIZE)]
+	stream.seek(pos, 1)
+	
+	regular = True
+	nb = 0
+	while regular:
+		stream.seek(DEFAULT_TWDATA_SIZE, 1)
+		info = read_ctrl_block(stream)
+		if not info or info["type"] != "twdatablock":
+			regular = False
+			stream.seek(-DEFAULT_TWDATA_SIZE, 1)
+			continue
+		
+		nb+=1
+		stream.seek(-ABCT_HEADER_SIZE, 1)
+
+	if nb == 0:
+		return False
+
+	sequence.append((nb, DEFAULT_TWDATA_SIZE))
+
+	stream.seek(ABCT_HEADER_SIZE, 1)
+	data = stream.read(DEFAULT_TWDATA_SIZE)
+	stream.seek(-len(data), 1)
+
+	oo = 0
+	found_pos = None
+	while oo < len(data):
+		pos = data.find(b"TWRP", oo+1)
+		if pos == -1:
+			print("Auto-fix: unable to find last twdatablock end position")
+			return False
+
+		stream.seek(pos, 1)
+		info = read_ctrl_block(stream)
+		stream.seek(-pos, 1)
+		if info:
+			stream.seek(-ABCT_HEADER_SIZE, 1)
+			found_pos = pos
+			break
+		
+		oo = pos
+	
+	if not found_pos:
+		print("not found")
+		return
+
+	sequence.append((1, found_pos + ABCT_HEADER_SIZE))
+	
+	stream.seek(found_pos, 1)
+
+	info = read_ctrl_block(stream)
+	if not info or info["type"] != "md5trailer":
+		return False
+
+	file_info["sequence"] = sequence
+	
+	file_info["real_size"] = 0
+	for (nb, size_t) in sequence:
+		file_info["real_size"]+= nb * (size_t-ABCT_HEADER_SIZE)
+
+	return info
+
+
+def export_file(stream, file_info):
 	name = os.path.basename(file_info["name"])
-	print("  *","pos", file_info["pos"])
-	print("  *","# chunks", file_info["nb_chunks"])
-	print("  *","last chunk size", file_info["last_size"])
-
 	stream.seek(file_info["pos"])
-	stream.seek(512, 1)
+	stream.seek(ABCT_HEADER_SIZE, 1)
 
-	if file_info["name"] in rules:
-		rule_set = rules[file_info["name"]]
-
-		with open(name, "wb") as f:			
-			print("first chunk", rule_set["start"])
-			stream.seek(512, 1)
-			f.write(stream.read(rule_set["start"]-512))
-
-			for i in range(rule_set["num_cycles"]):
-				stream.seek(512, 1)
-				f.write(stream.read(1024*1024  -512))
-
-			print("last chunk", rule_set["end"])
-			stream.seek(512, 1)
-			f.write(stream.read(rule_set["end"]-512))
-
-	else:
-		with open(name, "wb") as f:
-			for i in range(file_info["nb_chunks"]):
-				stream.seek(512, 1)
-				f.write(stream.read(1024*1024  -512))
-
-			if file_info["last_size"]:
-				print("last one", file_info["last_size"])
-				stream.seek(512, 1)
-				f.write(stream.read(file_info["last_size"]))
+	with open(name, "wb") as f:
+		for (nb, size_t) in file_info["sequence"]:
+			for i in range(nb):
+				stream.seek(ABCT_HEADER_SIZE, 1)
+				f.write(stream.read(size_t  -ABCT_HEADER_SIZE))
 
 
 def extract_string(data):
